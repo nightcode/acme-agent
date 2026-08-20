@@ -13,7 +13,8 @@ tasks:
     certificates:
       - domainName: host-01.example.org
         keyType: rsa2048
-    restartCmd: /opt/bin/svc -h /etc/service.d/application
+        # pkcs12Password: "[=P12_PASSWORD!'']"
+    restartCmd: /usr/bin/svc -t /etc/service.d/application
 
 acme:
   uri: https://ca.example.org:9000/acme/acme/directory

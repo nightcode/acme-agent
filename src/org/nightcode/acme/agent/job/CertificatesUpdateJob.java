@@ -18,6 +18,8 @@ import java.io.FileInputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -25,21 +27,27 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.GeneralSecurityException;
 import java.security.KeyPair;
+import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.util.io.pem.PemObject;
 import org.bouncycastle.util.io.pem.PemWriter;
+import org.jetbrains.annotations.Nullable;
 import org.nightcode.acme.agent.ServerConfig;
 import org.nightcode.acme.agent.config.CertificateInfo;
 import org.nightcode.acme.agent.config.CertificateTask;
@@ -75,6 +83,23 @@ public class CertificatesUpdateJob extends CronJob {
       case "rsa4096" -> KeyPairUtils.createKeyPair(4096);
       default -> throw new IllegalArgumentException("unsupported keyType: " + keyType + " (expected one of ec256, ec384, rsa2048, rsa4096)");
     };
+  }
+
+  private static List<String> tokenize(String command) {
+    Pattern regex        = Pattern.compile("[^\\s\"']+|\"([^\"]*)\"|'([^']*)'");
+    Matcher regexMatcher = regex.matcher(command);
+
+    List<String> list = new ArrayList<>();
+    while (regexMatcher.find()) {
+      if (regexMatcher.group(1) != null) {
+        list.add(regexMatcher.group(1));
+      } else if (regexMatcher.group(2) != null) {
+        list.add(regexMatcher.group(2));
+      } else {
+        list.add(regexMatcher.group());
+      }
+    }
+    return list;
   }
 
   private final AcmeService           acmeService;
@@ -114,17 +139,31 @@ public class CertificatesUpdateJob extends CronJob {
     boolean combined   = "combined".equals(type);
     String  path       = task.getPath().endsWith("/") ? task.getPath() + domainName : task.getPath() + "/" + domainName;
 
-    Path    crt       = Paths.get(path + ".crt");
+    String p12Password = cert.getPkcs12Password();
+    if (p12Password != null && p12Password.isBlank()) {
+      throw new IllegalStateException("pkcs12Password for '" + domainName + "' is blank");
+    }
+    boolean needP12 = p12Password != null;
+
+    Path crt = Paths.get(path + ".crt");
+    Path p12 = Paths.get(path + ".p12");
+
     boolean crtExists = Files.exists(crt);
     if (crtExists) {
       try (InputStream is = new FileInputStream(path + ".crt")) {
         CertificateFactory certificateFactory = CertificateFactory.getInstance("X509");
         X509Certificate    certificate        = (X509Certificate) certificateFactory.generateCertificate(is);
         if (!RenewalPolicy.def().renewalDue(certificate, certDaysTtl, Instant.now())) {
-          Log.info().log(getClass(), "certificate for domain '{}' does not need to be updated, expiration date is {}", domainName, certificate.getNotAfter());
-          return;
+          if (needP12 && !Files.exists(p12)) {
+            Log.info().log(getClass(), "certificate for domain '{}' is current but the requested PKCS#12 keystore is missing, reissuing...", domainName);
+          } else {
+            Log.info().log(getClass(), "certificate for domain '{}' does not need to be updated, expiration date is {}"
+                , domainName, certificate.getNotAfter());
+            return;
+          }
+        } else {
+          Log.info().log(getClass(), "certificate for domain'{}' is expiring soon (not after {}), replacing...", domainName, certificate.getNotAfter());
         }
-        Log.info().log(getClass(), "certificate for domain'{}' is expiring soon (not after {}), replacing...", domainName, certificate.getNotAfter());
       }
     } else {
       Log.info().log(getClass(), "certificate for domain '{}' does not exist, creating...", domainName);
@@ -139,14 +178,10 @@ public class CertificatesUpdateJob extends CronJob {
     Path tmpCrt = null;
     Path tmpKey = null;
     Path tmpCa  = null;
+    Path tmpP12 = null;
     try {
-      tmpCrt = Paths.get(path + ".crt.tmp");
-      Files.deleteIfExists(tmpCrt);
-      Files.createFile(tmpCrt, OWNER_ONLY);
-
-      tmpKey = Paths.get(path + ".key.tmp");
-      Files.deleteIfExists(tmpKey);
-      Files.createFile(tmpKey, OWNER_ONLY);
+      tmpKey = createTmpFile(path + ".key.tmp");
+      tmpCrt = createTmpFile(path + ".crt.tmp");
 
       if (combined) {
         try (PemWriter writer = new PemWriter(new FileWriter(tmpCrt.toString(), true))) {
@@ -156,9 +191,7 @@ public class CertificatesUpdateJob extends CronJob {
           }
         }
       } else {
-        tmpCa = Paths.get(path + ".ca.tmp");
-        Files.deleteIfExists(tmpCa);
-        Files.createFile(tmpCa, OWNER_ONLY);
+        tmpCa = createTmpFile(path + ".ca.tmp");
 
         try (PemWriter writer = new PemWriter(new FileWriter(tmpCrt.toString(), true))) {
           writer.writeObject(new PemObject(CERTIFICATE_OBJECT_TYPE, signedCertificateResult.certificate().getEncoded()));
@@ -175,6 +208,11 @@ public class CertificatesUpdateJob extends CronJob {
         writer.writeObject(new PemObject(PRIVATE_KEY_OBJECT_TYPE, keyPair.getPrivate().getEncoded()));
       }
 
+      if (needP12) {
+        tmpP12 = createTmpFile(path + ".p12.tmp");
+        writePkcs12(tmpP12, keyPair, signedCertificateResult, domainName, p12Password.toCharArray());
+      }
+
       Path key = Paths.get(path + ".key");
       Path ca  = Paths.get(path + ".ca");
 
@@ -182,29 +220,16 @@ public class CertificatesUpdateJob extends CronJob {
       Path   keyPrev = Paths.get(path + ".key." + stamp);
       Path   crtPrev = Paths.get(path + ".crt." + stamp);
       Path   caPrev  = Paths.get(path + ".ca." + stamp);
+      Path   p12Prev = Paths.get(path + ".p12." + stamp);
 
-      if (crtExists) {
-        Files.move(crt, crtPrev, StandardCopyOption.REPLACE_EXISTING);
-        Files.setPosixFilePermissions(crtPrev, CERTIFICATE_PERMISSIONS);
-      }
-      Files.move(tmpCrt, crt, StandardCopyOption.REPLACE_EXISTING);
-      Files.setPosixFilePermissions(crt, CERTIFICATE_PERMISSIONS);
-
+      replace(crtExists, key, keyPrev, tmpKey, OWNER_ONLY_PERMISSIONS);
+      replace(crtExists, crt, crtPrev, tmpCrt, CERTIFICATE_PERMISSIONS);
       if (!combined) {
-        if (crtExists) {
-          Files.move(ca, caPrev, StandardCopyOption.REPLACE_EXISTING);
-          Files.setPosixFilePermissions(caPrev, CERTIFICATE_PERMISSIONS);
-        }
-        Files.move(tmpCa, ca, StandardCopyOption.REPLACE_EXISTING);
-        Files.setPosixFilePermissions(ca, CERTIFICATE_PERMISSIONS);
+        replace(crtExists, ca, caPrev, tmpCa, CERTIFICATE_PERMISSIONS);
       }
-
-      if (crtExists) {
-        Files.move(key, keyPrev, StandardCopyOption.REPLACE_EXISTING);
-        Files.setPosixFilePermissions(keyPrev, OWNER_ONLY_PERMISSIONS);
+      if (needP12) {
+        replace(Files.exists(p12), p12, p12Prev, tmpP12, OWNER_ONLY_PERMISSIONS);
       }
-      Files.move(tmpKey, key, StandardCopyOption.REPLACE_EXISTING);
-      Files.setPosixFilePermissions(key, OWNER_ONLY_PERMISSIONS);
 
       Log.info().log(getClass(), "certificate '{}' updated successfully", domainName);
 
@@ -217,20 +242,51 @@ public class CertificatesUpdateJob extends CronJob {
 
       pruneArchives(crt.toAbsolutePath().getParent(), domainName);
     } finally {
-      if (tmpKey != null) {
-        Files.deleteIfExists(tmpKey);
-      }
-      if (tmpCrt != null) {
-        Files.deleteIfExists(tmpCrt);
-      }
-      if (tmpCa != null) {
-        Files.deleteIfExists(tmpCa);
-      }
+      safelyDelete(tmpKey);
+      safelyDelete(tmpCrt);
+      safelyDelete(tmpCa);
+      safelyDelete(tmpP12);
+    }
+  }
+
+  private Path createTmpFile(String filename) throws IOException {
+    Path tmp = Paths.get(filename);
+    Files.deleteIfExists(tmp);
+    Files.createFile(tmp, OWNER_ONLY);
+    return tmp;
+  }
+
+  private PKCS10CertificationRequest csr(KeyPair domainKeyPair, List<String> domains) throws IOException {
+    CSRBuilder builder = new CSRBuilder();
+    domains.forEach(builder::addDomain);
+    builder.sign(domainKeyPair);
+    return builder.getCSR();
+  }
+
+  private void doRestart(String cmd) throws IOException {
+    List<String> argv = tokenize(cmd);
+    if (argv.isEmpty()) {
+      Log.info().log(getClass(), "restartCmd '{}' holds no executable, skipping the service restart", cmd);
+      return;
+    }
+
+    Process restart = new ProcessBuilder(argv).redirectErrorStream(true).start();
+
+    int exitValue;
+    try {
+      exitValue = restart.waitFor();
+    } catch (InterruptedException ex) {
+      restart.destroy();
+      Thread.currentThread().interrupt();
+      throw new InterruptedIOException("interrupted while waiting for restart command: " + cmd);
+    }
+    if (exitValue != 0) {
+      throw new RuntimeException("restart command returned unsuccessful response code: " + exitValue);
     }
   }
 
   private void pruneArchives(Path dir, String domainName) throws IOException {
-    for (String suffix : List.of(".crt.", ".key.", ".ca.")) {
+    for (String suffix : List.of(".crt.", ".key.", ".ca.", ".p12.")) {
       String     prefix = domainName + suffix;
       List<Path> archives;
       try (Stream<Path> files = Files.list(dir)) {
@@ -247,23 +303,38 @@ public class CertificatesUpdateJob extends CronJob {
     }
   }
 
-  private void doRestart(String cmd) throws IOException {
-    Process restart = Runtime.getRuntime().exec(new String[]{"bash", "-c", cmd});
-    try {
-      restart.waitFor();
-    } catch (InterruptedException ex) {
-      Thread.currentThread().interrupt();
+  private void replace(boolean exist, Path actual, Path prev, Path tmp, Set<PosixFilePermission> permissions) throws IOException {
+    if (exist) {
+      Files.move(actual, prev, StandardCopyOption.REPLACE_EXISTING);
+      Files.setPosixFilePermissions(prev, permissions);
     }
-    int exitValue = restart.exitValue();
-    if (exitValue != 0) {
-      throw new RuntimeException("restart command returned unsuccessful response code: " + exitValue);
+    Files.move(tmp, actual, StandardCopyOption.REPLACE_EXISTING);
+    Files.setPosixFilePermissions(actual, permissions);
+  }
+
+  private void safelyDelete(@Nullable Path path) {
+    if (path != null) {
+      try {
+        Files.deleteIfExists(path);
+      } catch (IOException ex) {
+        Log.warn().log(getClass(), ex, "failed to delete file {}", path);
+      }
     }
   }
 
-  private PKCS10CertificationRequest csr(KeyPair domainKeyPair, List<String> domains) throws IOException {
-    CSRBuilder builder = new CSRBuilder();
-    domains.forEach(builder::addDomain);
-    builder.sign(domainKeyPair);
-    return builder.getCSR();
+  private void writePkcs12(Path dest, KeyPair keyPair, SignedCertificateResult result, String domainName, char[] password)
+      throws GeneralSecurityException, IOException {
+    X509Certificate[] chain = new X509Certificate[result.chain().size() + 1];
+    chain[0] = result.certificate();
+    for (int i = 0; i < result.chain().size(); i++) {
+      chain[i + 1] = result.chain().get(i);
+    }
+
+    KeyStore keyStore = KeyStore.getInstance("PKCS12");
+    keyStore.load(null, null);
+    keyStore.setKeyEntry(domainName, keyPair.getPrivate(), password, chain);
+    try (OutputStream os = Files.newOutputStream(dest)) {
+      keyStore.store(os, password);
+    }
   }
 }

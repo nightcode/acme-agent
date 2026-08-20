@@ -24,9 +24,10 @@ import static lombok.AccessLevel.PRIVATE;
 @Getter
 @Setter
 @FieldDefaults(level = PRIVATE)
-@ToString
+@ToString(exclude = "pkcs12Password")
 public class CertificateInfo {
 
   String domainName;
   String keyType;
+  String pkcs12Password;
 }
