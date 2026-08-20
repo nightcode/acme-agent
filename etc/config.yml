@@ -1,0 +1,32 @@
+appName: AcmeAgent
+
+dnsProvider: BIND
+certDaysTtl: 10
+certificatesUpdateJobCron: "10 1 * * *"
+archiveRetention: 2
+  
+otelCollectorEndpoint: "http://localhost:4317"
+
+tasks:
+  - type: combined
+    path: /var/lib/acme-agent/certs
+    certificates:
+      - domainName: host-01.example.org
+        keyType: rsa2048
+    restartCmd: /opt/bin/svc -h /etc/service.d/application
+
+acme:
+  uri: https://ca.example.org:9000/acme/acme/directory
+  email: hostmaster@example.org
+  accountKeyPairPath: /etc/acme-agent/account.pem
+  customCaPath: /etc/acme-agent/internal-root.pem
+
+bind:
+  server: ns1.example.org
+  port: 53
+  tcp: true
+  ttlSec: 60
+  dynamicZone: _acme.example.org
+  tsigKeyName: acme-update
+  tsigAlgorithm: hmac-sha256
+  tsigSecret: "[=TSIG_SECRET!'']"

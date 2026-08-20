@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration monitorInterval="30">
+  <Appenders>
+    <Console name="STDOUT" target="SYSTEM_OUT" ignoreExceptions="false">
+      <PatternLayout pattern="%-5level %d{yyyy.MM.dd HH:mm:ss.SSS} [%X{trace_id}:%X{span_id}/%-logger{50}/%thread]: %msg%n" />
+    </Console>
+    <OpenTelemetry name="OpenTelemetryAppender" captureMapMessageAttributes="true" captureExperimentalAttributes="true"/>
+  </Appenders>
+  <Loggers>
+    <Root level="INFO">
+      <AppenderRef ref="STDOUT"/>
+      <AppenderRef ref="OpenTelemetryAppender"/>
+    </Root>
+  </Loggers>
+</Configuration>
