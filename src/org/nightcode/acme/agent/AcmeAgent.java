@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.Security;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
@@ -27,6 +28,8 @@ import org.nightcode.common.config.ConfigLoader;
 import org.nightcode.common.service.ServiceBootstrap;
 
 public final class AcmeAgent {
+
+  private static final Semaphore SHUTDOWN = new Semaphore(0, true);
 
   static {
     if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
@@ -53,6 +56,8 @@ public final class AcmeAgent {
           .build();
     }
 
+    Runtime.getRuntime().addShutdownHook(new Thread(SHUTDOWN::release, "acme-agent.await-shutdown"));
+
     new ServiceBootstrap<ServerConfig>("org.nightcode", "acme-agent")
         .config(() -> serverConfig)
         .logRecordExporter(logRecordExporter)
@@ -61,6 +66,12 @@ public final class AcmeAgent {
           factory.certificateUpdateService().startAsync().get();
         })
         .start();
+
+    try {
+      SHUTDOWN.acquire();
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   private AcmeAgent() {
