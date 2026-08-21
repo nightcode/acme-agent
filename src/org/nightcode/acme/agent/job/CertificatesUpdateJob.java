@@ -259,6 +259,10 @@ public class CertificatesUpdateJob extends CronJob {
   private PKCS10CertificationRequest csr(KeyPair domainKeyPair, List<String> domains) throws IOException {
     CSRBuilder builder = new CSRBuilder();
     domains.forEach(builder::addDomain);
+    String cn = domains.getFirst();
+    if (cn.length() <= 64) {
+      builder.setCommonName(cn);
+    }
     builder.sign(domainKeyPair);
     return builder.getCSR();
   }
