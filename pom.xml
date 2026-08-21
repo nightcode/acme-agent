@@ -18,7 +18,7 @@
   <groupId>org.nightcode</groupId>
   <artifactId>acme-agent</artifactId>
   <packaging>jar</packaging>
-  <version>0.2</version>
+  <version>0.2.1-SNAPSHOT</version>
 
   <name>ACME-Agent</name>
   <description>Java implementation of the ACME-Agent.</description>

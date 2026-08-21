@@ -36,6 +36,7 @@ import org.nightcode.acme.agent.service.dns.Dns;
 import org.nightcode.acme.agent.service.dns.RecordType;
 import org.nightcode.acme.agent.service.dns.impl.BindDnsProvider;
 import org.nightcode.acme.agent.util.CnameResolver;
+import org.nightcode.acme.agent.util.PemUtils;
 import org.nightcode.common.logging.Log;
 import org.shredzone.acme4j.Account;
 import org.shredzone.acme4j.AccountBuilder;
@@ -49,7 +50,6 @@ import org.shredzone.acme4j.challenge.Challenge;
 import org.shredzone.acme4j.challenge.Dns01Challenge;
 import org.shredzone.acme4j.exception.AcmeException;
 import org.shredzone.acme4j.provider.AcmeProvider;
-import org.shredzone.acme4j.util.KeyPairUtils;
 import org.xbill.DNS.Name;
 import org.xbill.DNS.lookup.LookupResult;
 import org.xbill.DNS.lookup.LookupSession;
@@ -80,7 +80,7 @@ public class AcmeServiceImpl implements AcmeService {
     this.provider = (customCa == null || customCa.isEmpty()) ? null : new CustomCaAcmeProvider(Paths.get(customCa));
 
     try (Reader r = new FileReader(acme.getAccountKeyPairPath())) {
-      keyPair = KeyPairUtils.readKeyPair(r);
+      keyPair = PemUtils.readKeyPair(r);
     } catch (IOException ex) {
       throw new RuntimeException(ex);
     }
